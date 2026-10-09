@@ -46,14 +46,18 @@ pub fn now_secs() -> u64 {
 
 /// Describes how long ago a unix timestamp was, e.g. `5m ago`.
 pub fn ago(timestamp: u64) -> String {
-	let secs = now_secs().saturating_sub(timestamp);
+	format!("{} ago", duration(now_secs().saturating_sub(timestamp)))
+}
+
+/// A short human duration, e.g. `5m` or `3d`.
+pub fn duration(secs: u64) -> String {
 	let (n, unit) = match secs {
 		0..=59 => (secs, "s"),
 		60..=3_599 => (secs / 60, "m"),
 		3_600..=86_399 => (secs / 3_600, "h"),
 		_ => (secs / 86_400, "d"),
 	};
-	format!("{n}{unit} ago")
+	format!("{n}{unit}")
 }
 
 #[cfg(test)]
@@ -77,6 +81,15 @@ mod tests {
 		assert_eq!(msat(1_000), "1 sat");
 		assert_eq!(msat(1_500), "1 sat");
 		assert_eq!(msat(2_000_000), "2,000 sats");
+	}
+
+	#[test]
+	fn formats_durations() {
+		assert_eq!(duration(0), "0s");
+		assert_eq!(duration(59), "59s");
+		assert_eq!(duration(60), "1m");
+		assert_eq!(duration(3_600), "1h");
+		assert_eq!(duration(2 * 86_400), "2d");
 	}
 
 	#[test]

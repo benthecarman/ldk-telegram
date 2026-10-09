@@ -18,7 +18,7 @@ use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use teloxide::utils::command::BotCommands;
 
-use crate::format::{ago, escape, group, msat, now_secs, sats};
+use crate::format::{ago, duration, escape, group, msat, now_secs, sats};
 use crate::node::Node;
 use crate::shutdown::Shutdown;
 use crate::telegram::{send_html, TgBot};
@@ -26,6 +26,8 @@ use crate::telegram::{send_html, TgBot};
 const DAY_SECS: u64 = 24 * 60 * 60;
 const WEEK_SECS: u64 = 7 * DAY_SECS;
 const TOP_PEERS: usize = 5;
+/// Wallets normally sync every few seconds to a couple of minutes, depending on the backend.
+const STALE_SYNC_SECS: u64 = 10 * 60;
 /// Longest a command may take. Shutdown waits for running commands, so keep this bounded.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -159,7 +161,6 @@ async fn info(node: &Node) -> Result<String> {
 		.map(|n| n.as_str_name().to_lowercase())
 		.unwrap_or_else(|| "unknown".to_string());
 	let alias = info.node_alias.as_deref().filter(|a| !a.is_empty()).unwrap_or("(no alias)");
-	let synced = |timestamp: Option<u64>| timestamp.map(ago).unwrap_or_else(|| "never".to_string());
 
 	let mut text = format!(
 		"🤖 <b>{}</b>\n<code>{}</code>\n\n\
@@ -167,20 +168,34 @@ async fn info(node: &Node) -> Result<String> {
 		 Block: {}\n\
 		 Channels: {active} active, {inactive} inactive, {pending} pending\n\
 		 Peers: {connected} connected\n\
-		 Lightning sync: {}\n\
-		 On-chain sync: {}\n\
 		 Version: {}",
 		escape(alias),
 		info.node_id,
 		info.current_best_block.map(|b| group(b.height.into())).unwrap_or_default(),
-		synced(info.latest_lightning_wallet_sync_timestamp),
-		synced(info.latest_onchain_wallet_sync_timestamp),
 		escape(&info.version),
 	);
+	let now = now_secs();
+	let syncs = [
+		("Lightning", info.latest_lightning_wallet_sync_timestamp),
+		("On-chain", info.latest_onchain_wallet_sync_timestamp),
+	];
+	for (wallet, timestamp) in syncs {
+		if let Some(warning) = stale_sync_warning(wallet, timestamp, now) {
+			text.push_str(&format!("\n{warning}"));
+		}
+	}
 	for uri in &info.node_uris {
 		text.push_str(&format!("\n<code>{}</code>", escape(uri)));
 	}
 	Ok(text)
+}
+
+/// Warns about a wallet that hasn't synced for a while. Recent syncs aren't worth showing:
+/// with a bitcoind backend they happen every few seconds.
+fn stale_sync_warning(wallet: &str, timestamp: Option<u64>, now: u64) -> Option<String> {
+	let age = now.saturating_sub(timestamp?);
+	(age >= STALE_SYNC_SECS)
+		.then(|| format!("⚠️ {wallet} wallet last synced {} ago", duration(age)))
 }
 
 async fn balance(node: &Node) -> Result<String> {
@@ -592,4 +607,21 @@ async fn find_peers(
 		}
 	}
 	matches
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn only_warns_about_stale_syncs() {
+		let now = 1_000_000;
+		assert_eq!(stale_sync_warning("Lightning", None, now), None);
+		assert_eq!(stale_sync_warning("Lightning", Some(now), now), None);
+		assert_eq!(stale_sync_warning("Lightning", Some(now - 599), now), None);
+		assert_eq!(
+			stale_sync_warning("On-chain", Some(now - 2 * 3_600), now),
+			Some("⚠️ On-chain wallet last synced 2h ago".to_string())
+		);
+	}
 }
