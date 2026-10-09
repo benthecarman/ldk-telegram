@@ -1,0 +1,19 @@
+[package]
+name = "ldk-telegram"
+version = "0.1.0"
+edition = "2021"
+description = "Telegram bot that watches an LDK Server node"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "21a903ccb89496285c58a55ffdce42a9f0353a05", features = ["serde"] }
+sd-notify = "0.5"
+serde = { version = "1", features = ["derive"] }
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "throttle"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2", features = ["serde"] }

@@ -1,0 +1,50 @@
+# ldk-telegram configuration
+
+[telegram]
+# Bot token from @BotFather. Use only one of bot_token and bot_token_file. If neither is set,
+# the bot reads the "bot-token" systemd credential, then the LDK_TELEGRAM_BOT_TOKEN
+# environment variable.
+# bot_token = "123456789:ABC..."
+bot_token_file = "/run/secrets/ldk-telegram-token"
+
+# The chat the bot posts to and accepts commands from. Start the bot, send it /connect, and
+# put the ID it replies with here.
+chat_id = 0
+
+# Bot API server to use instead of api.telegram.org, such as a self-hosted telegram-bot-api.
+# api_url = "http://127.0.0.1:8081"
+
+[ldk_server]
+# Point at ldk-server's own config to discover its gRPC address, TLS certificate, and admin
+# macaroon. The "macaroon" and "tls-cert" systemd credentials, and the settings below, override
+# what is discovered.
+config_path = "/var/lib/ldk-server/config.toml"
+
+# address = "127.0.0.1:3536"
+# cert_path = "/var/lib/ldk-server/tls.crt"
+
+# A read-only macaroon is enough and recommended. Create one with:
+#   ldk-server-cli create-macaroon telegram -p node:read channels:read payments:read \
+#     peers:read graph:read events:read
+# and save the hex token to this file.
+# macaroon_path = "/var/lib/ldk-telegram/telegram.macaroon"
+
+[notifications]
+payments_received = true
+payments_sent = true
+payments_failed = true
+# Payments created with Bolt11ReceiveForHash that are waiting to be claimed or failed.
+payments_claimable = true
+# Channel opening, opened, open failed, closed, and splices.
+channels = true
+forwards = true
+
+# Forwards are posted as one digest message at this interval.
+forward_digest_interval_secs = 300
+# Leave forwards below this amount out of the digest.
+min_forward_amount_sats = 0
+# Don't post sent or received payments below this amount.
+min_payment_amount_sats = 0
+
+# Post an alert once ldk-server has been unreachable for this long.
+offline_alert_after_secs = 120
