@@ -13,7 +13,8 @@ From ldk-server's event stream:
 - ❌ Failed payments, with the reason
 - ⏳ Payments waiting to be claimed (`Bolt11ReceiveForHash` and similar)
 - 💸 Forwards, collected into a digest every few minutes
-- ⏳ Channels opening, 🌹 opened, ⚠️ failed to open, and 🥀 closed, with the close reason
+- ⏳ Channels opening, 🌹 opened, ⚠️ failed to open, 🥀 closed, and 💥 force-closed, with the
+  reason
 - 🔀 Splices negotiated or failed
 - 🤖 A message when the bot starts, and an alert if ldk-server stays unreachable
 

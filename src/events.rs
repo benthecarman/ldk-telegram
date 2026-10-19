@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ldk_server_client::ldk_server_grpc::events::channel_state_change_reason::Details;
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event;
 use ldk_server_client::ldk_server_grpc::events::{
-	ChannelClosureInitiator, ChannelState, ChannelStateChanged, EventEnvelope, PaymentFailureReason,
+	ChannelClosureInitiator, ChannelState, ChannelStateChangeReason, ChannelStateChangeReasonKind,
+	ChannelStateChanged, EventEnvelope, PaymentFailureReason,
 };
 use ldk_server_client::ldk_server_grpc::types::payment_kind::Kind;
 use ldk_server_client::ldk_server_grpc::types::Payment;
@@ -195,9 +197,8 @@ async fn channel_message(node: &Node, event: ChannelStateChanged) -> Option<Stri
 	let reason = event
 		.reason
 		.as_ref()
-		.map(|r| r.message.trim())
-		.filter(|m| !m.is_empty())
-		.map(|m| format!("\n{}", escape(m)))
+		.and_then(reason_text)
+		.map(|r| format!("\nReason: {}", escape(&r)))
 		.unwrap_or_default();
 
 	match state {
@@ -217,10 +218,44 @@ async fn channel_message(node: &Node, event: ChannelStateChanged) -> Option<Stri
 				Some(ChannelClosureInitiator::Remote) => " (closed by peer)",
 				_ => "",
 			};
-			Some(format!("🥀 Channel closed with {peer}{capacity}{closer}{reason}"))
+			let forced = event.reason.as_ref().is_some_and(is_force_close);
+			let closed = if forced { "💥 Channel force-closed" } else { "🥀 Channel closed" };
+			Some(format!("{closed} with {peer}{capacity}{closer}{reason}"))
 		},
 		ChannelState::Unspecified => None,
 	}
+}
+
+fn is_force_close(reason: &ChannelStateChangeReason) -> bool {
+	matches!(
+		ChannelStateChangeReasonKind::from_i32(reason.kind),
+		Some(
+			ChannelStateChangeReasonKind::CounterpartyForceClosed
+				| ChannelStateChangeReasonKind::HolderForceClosed
+				| ChannelStateChangeReasonKind::ProcessingError
+				| ChannelStateChangeReasonKind::HtlcsTimedOut
+				| ChannelStateChangeReasonKind::PeerFeerateTooLow
+		)
+	)
+}
+
+/// Why a channel changed state, preferring the message from whoever closed it over LDK's summary.
+fn reason_text(reason: &ChannelStateChangeReason) -> Option<String> {
+	let detail = match &reason.details {
+		Some(Details::CounterpartyForceClosed(d)) if d.peer_msg.trim().is_empty() => {
+			"peer gave no reason"
+		},
+		Some(Details::CounterpartyForceClosed(d)) => d.peer_msg.trim(),
+		Some(Details::HolderForceClosed(d)) => d.message.trim(),
+		Some(Details::ProcessingError(d)) => d.err.trim(),
+		_ => "",
+	};
+	if !detail.is_empty() {
+		return Some(detail.to_string());
+	}
+	let message = reason.message.trim();
+	let message = message.strip_prefix("Channel closed because ").unwrap_or(message);
+	(!message.is_empty()).then(|| message.to_string())
 }
 
 fn amount(payment: &Payment) -> String {
@@ -261,5 +296,70 @@ fn failure_reason(reason: PaymentFailureReason) -> &'static str {
 		PaymentFailureReason::InvoiceRequestExpired => "invoice request expired",
 		PaymentFailureReason::InvoiceRequestRejected => "invoice request rejected",
 		PaymentFailureReason::BlindedPathCreationFailed => "failed to create blinded path",
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ldk_server_client::ldk_server_grpc::events::{
+		CounterpartyForceClosedDetails, HolderForceClosedDetails,
+	};
+
+	use super::*;
+
+	fn reason(
+		kind: ChannelStateChangeReasonKind, message: &str, details: Option<Details>,
+	) -> ChannelStateChangeReason {
+		ChannelStateChangeReason { kind: kind.into(), message: message.to_string(), details }
+	}
+
+	#[test]
+	fn force_close_reason_uses_closer_message() {
+		let peer = reason(
+			ChannelStateChangeReasonKind::CounterpartyForceClosed,
+			"Channel closed because counterparty force-closed with message: bye",
+			Some(Details::CounterpartyForceClosed(CounterpartyForceClosedDetails {
+				peer_msg: "bye".to_string(),
+			})),
+		);
+		assert!(is_force_close(&peer));
+		assert_eq!(reason_text(&peer).as_deref(), Some("bye"));
+
+		let us = reason(
+			ChannelStateChangeReasonKind::HolderForceClosed,
+			"Channel closed because user force-closed the channel with the message \"stuck\"",
+			Some(Details::HolderForceClosed(HolderForceClosedDetails {
+				broadcasted_latest_txn: Some(true),
+				message: "stuck".to_string(),
+			})),
+		);
+		assert!(is_force_close(&us));
+		assert_eq!(reason_text(&us).as_deref(), Some("stuck"));
+	}
+
+	#[test]
+	fn reason_falls_back_to_summary() {
+		let silent_peer = reason(
+			ChannelStateChangeReasonKind::CounterpartyForceClosed,
+			"Channel closed because counterparty force-closed with message: ",
+			Some(Details::CounterpartyForceClosed(CounterpartyForceClosedDetails {
+				peer_msg: String::new(),
+			})),
+		);
+		assert_eq!(reason_text(&silent_peer).as_deref(), Some("peer gave no reason"));
+
+		let coop = reason(
+			ChannelStateChangeReasonKind::LocallyInitiatedCooperativeClosure,
+			"Channel closed because the channel was cooperatively closed by us",
+			None,
+		);
+		assert!(!is_force_close(&coop));
+		assert_eq!(
+			reason_text(&coop).as_deref(),
+			Some("the channel was cooperatively closed by us")
+		);
+
+		let empty = reason(ChannelStateChangeReasonKind::Unspecified, "", None);
+		assert_eq!(reason_text(&empty), None);
 	}
 }
