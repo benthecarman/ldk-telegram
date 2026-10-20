@@ -161,9 +161,17 @@ async fn info(node: &Node) -> Result<String> {
 	let channels = node.list_channels().await?;
 	let peers = node.client.list_peers(ListPeersRequest {}).await?.peers;
 
-	let pending = channels.iter().filter(|c| !c.is_channel_ready).count();
-	let active = channels.iter().filter(|c| c.is_usable).count();
-	let inactive = channels.len() - pending - active;
+	let count = |status| channels.iter().filter(|c| ChannelStatus::of(c) == status).count();
+	let mut channel_counts = format!(
+		"{} active, {} inactive, {} pending",
+		count(ChannelStatus::Active),
+		count(ChannelStatus::Inactive),
+		count(ChannelStatus::Opening)
+	);
+	let closing = count(ChannelStatus::Closing);
+	if closing > 0 {
+		channel_counts.push_str(&format!(", {closing} closing"));
+	}
 	let connected = peers.iter().filter(|p| p.is_connected).count();
 	let network = Network::from_i32(info.network)
 		.map(|n| n.as_str_name().to_lowercase())
@@ -174,7 +182,7 @@ async fn info(node: &Node) -> Result<String> {
 		"🤖 <b>{}</b>\n<code>{}</code>\n\n\
 		 Network: {network}\n\
 		 Block: {}\n\
-		 Channels: {active} active, {inactive} inactive, {pending} pending\n\
+		 Channels: {channel_counts}\n\
 		 Peers: {connected} connected\n\
 		 Version: {}",
 		escape(alias),
@@ -397,7 +405,8 @@ async fn pending(node: &Node) -> Result<String> {
 	let balances = node.client.get_balances(GetBalancesRequest {}).await?;
 	let mut lines = Vec::new();
 
-	for channel in channels.iter().filter(|c| !c.is_channel_ready) {
+	let opening = channels.iter().filter(|c| ChannelStatus::of(c) == ChannelStatus::Opening);
+	for channel in opening {
 		let confirmations = match (channel.confirmations, channel.confirmations_required) {
 			(Some(have), Some(need)) => format!(" ({have}/{need} confirmations)"),
 			_ => String::new(),
