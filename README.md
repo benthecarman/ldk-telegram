@@ -26,6 +26,7 @@ is not posted.
 | Command | Description |
 |---------|-------------|
 | `/balance` | Lightning, on-chain, reserve, and sweeping balances |
+| `/channels` | Each channel's peer, state, capacity, age, outbound and inbound balance, and fee rate |
 | `/info` | Alias, public key, block height, channel and peer counts, sync times, version |
 | `/liquidity [peer]` | Inbound and outbound liquidity, in total or with a peer |
 | `/pending` | Opening and closing channels, in-flight HTLCs, claimable and sweeping funds |
@@ -69,7 +70,7 @@ permissions:
 |------------|----------|
 | `events:read` | The event stream that drives notifications |
 | `node:read` | `/info`, `/balance`, `/pending`, `/version` |
-| `channels:read` | `/liquidity`, `/pending`, `/graph`, channel details in notifications |
+| `channels:read` | `/channels`, `/liquidity`, `/pending`, `/graph`, channel details in notifications |
 | `payments:read` | `/earnings`, `/costs` |
 | `peers:read` | `/info`, `/graph`, peer lookup by alias |
 | `graph:read` | Peer aliases in messages, `/graph` |

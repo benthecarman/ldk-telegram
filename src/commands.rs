@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,8 +12,8 @@ use ldk_server_client::ldk_server_grpc::types::lightning_balance::BalanceType as
 use ldk_server_client::ldk_server_grpc::types::payment_kind::Kind;
 use ldk_server_client::ldk_server_grpc::types::pending_sweep_balance::BalanceType as SweepBalanceType;
 use ldk_server_client::ldk_server_grpc::types::{
-	ChannelShutdownState, ForwardedPaymentTrackingMode, Network, PaymentDirection, PaymentStatus,
-	PendingSweepBalance,
+	Channel, ChannelShutdownState, ForwardedPaymentTrackingMode, Network, PaymentDirection,
+	PaymentStatus, PendingSweepBalance,
 };
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
@@ -26,6 +27,10 @@ use crate::telegram::{send_html, TgBot};
 const DAY_SECS: u64 = 24 * 60 * 60;
 const WEEK_SECS: u64 = 7 * DAY_SECS;
 const TOP_PEERS: usize = 5;
+/// Width of the outbound/inbound bar drawn for each channel in /channels.
+const BAR_WIDTH: u64 = 10;
+/// Average time between blocks, for turning block counts into rough durations.
+const BLOCK_SECS: u64 = 10 * 60;
 /// Wallets normally sync every few seconds to a couple of minutes, depending on the backend.
 const STALE_SYNC_SECS: u64 = 10 * 60;
 /// Longest a command may take. Shutdown waits for running commands, so keep this bounded.
@@ -36,6 +41,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum Command {
 	#[command(description = "Show funds on the node")]
 	Balance,
+	#[command(description = "List channels with their balances")]
+	Channels,
 	#[command(description = "Get the chat ID to put in the config")]
 	Connect,
 	#[command(description = "Show payment fees paid over the past week")]
@@ -103,6 +110,7 @@ pub async fn handle(
 			let run = async {
 				match cmd {
 					Command::Balance => balance(node).await,
+					Command::Channels => channels(node).await,
 					Command::Costs => costs(node).await,
 					Command::Earnings => earnings(node).await,
 					Command::Graph(query) => graph(node, query.trim()).await,
@@ -223,6 +231,131 @@ async fn balance(node: &Node) -> Result<String> {
 	Ok(text)
 }
 
+/// Where a channel is in its life.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChannelStatus {
+	Active,
+	Inactive,
+	Opening,
+	Closing,
+}
+
+impl ChannelStatus {
+	fn of(channel: &Channel) -> Self {
+		if is_closing(channel) {
+			Self::Closing
+		} else if !channel.is_channel_ready {
+			Self::Opening
+		} else if !channel.is_usable {
+			Self::Inactive
+		} else {
+			Self::Active
+		}
+	}
+}
+
+async fn channels(node: &Node) -> Result<String> {
+	let mut channels = node.list_channels().await?;
+	if channels.is_empty() {
+		return Ok("No channels.".to_string());
+	}
+	channels.sort_by_key(|c| Reverse(c.channel_value_sats));
+	let height = node.client.get_node_info(GetNodeInfoRequest {}).await?.current_best_block;
+	let height = height.map(|b| b.height);
+
+	let capacity: u64 = channels.iter().map(|c| c.channel_value_sats).sum();
+	let noun = if channels.len() == 1 { "channel" } else { "channels" };
+	let counts: Vec<_> = [
+		(ChannelStatus::Active, "active"),
+		(ChannelStatus::Inactive, "inactive"),
+		(ChannelStatus::Opening, "opening"),
+		(ChannelStatus::Closing, "closing"),
+	]
+	.into_iter()
+	.filter_map(|(status, name)| {
+		let count = channels.iter().filter(|c| ChannelStatus::of(c) == status).count();
+		(count > 0).then(|| format!("{count} {name}"))
+	})
+	.collect();
+	let mut text =
+		format!("📊 <b>{} {noun}</b>: {}\n{}", channels.len(), sats(capacity), counts.join(", "));
+
+	for channel in &channels {
+		let status = ChannelStatus::of(channel);
+		let icon = match status {
+			ChannelStatus::Active => "🟢",
+			ChannelStatus::Inactive => "🔴",
+			ChannelStatus::Opening => "⏳",
+			ChannelStatus::Closing => "🥀",
+		};
+		let private = if channel.is_announced { "" } else { " 🕶️" };
+		let age = match (channel.short_channel_id, height) {
+			(Some(scid), Some(height)) => format!(" · {} old", duration(channel_age(scid, height))),
+			_ => String::new(),
+		};
+		text.push_str(&format!(
+			"\n\n{icon} <b>{}</b>: {}{age}{private}\n",
+			node.label(&channel.counterparty_node_id).await,
+			sats(channel.channel_value_sats)
+		));
+		match status {
+			ChannelStatus::Opening => {
+				text.push_str("Opening");
+				if let (Some(have), Some(need)) =
+					(channel.confirmations, channel.confirmations_required)
+				{
+					text.push_str(&format!(" ({have}/{need} confirmations)"));
+				}
+			},
+			ChannelStatus::Closing => text.push_str("Closing"),
+			ChannelStatus::Active | ChannelStatus::Inactive => {
+				text.push_str(&format!(
+					"{} {} out, {} in",
+					balance_bar(channel.outbound_capacity_msat, channel.inbound_capacity_msat),
+					msat(channel.outbound_capacity_msat),
+					msat(channel.inbound_capacity_msat)
+				));
+				let ppm = channel
+					.channel_config
+					.as_ref()
+					.and_then(|c| c.forwarding_fee_proportional_millionths);
+				if let Some(ppm) = ppm {
+					text.push_str(&format!(" · {} ppm", group(ppm.into())));
+				}
+			},
+		}
+	}
+	Ok(text)
+}
+
+/// A bar showing how much of a channel's spendable balance is on our side.
+fn balance_bar(outbound_msat: u64, inbound_msat: u64) -> String {
+	let total = u128::from(outbound_msat) + u128::from(inbound_msat);
+	let filled = match total {
+		0 => 0,
+		// Round to the nearest cell.
+		_ => ((u128::from(outbound_msat) * u128::from(BAR_WIDTH) + total / 2) / total) as u64,
+	};
+	"▰".repeat(filled as usize) + &"▱".repeat((BAR_WIDTH - filled) as usize)
+}
+
+/// Roughly how long ago a channel's funding confirmed, from the block height in its short
+/// channel ID.
+fn channel_age(short_channel_id: u64, height: u32) -> u64 {
+	let funded_at = short_channel_id >> 40;
+	u64::from(height).saturating_sub(funded_at) * BLOCK_SECS
+}
+
+fn is_closing(channel: &Channel) -> bool {
+	matches!(
+		channel.channel_shutdown_state.and_then(ChannelShutdownState::from_i32),
+		Some(ChannelShutdownState::ShutdownInitiated)
+			| Some(ChannelShutdownState::ResolvingHtlcs)
+			| Some(ChannelShutdownState::NegotiatingClosingFee)
+			| Some(ChannelShutdownState::ShutdownComplete)
+	)
+}
+
 async fn liquidity(node: &Node, query: &str) -> Result<String> {
 	let channels: Vec<_> =
 		node.list_channels().await?.into_iter().filter(|c| c.is_channel_ready).collect();
@@ -276,22 +409,12 @@ async fn pending(node: &Node) -> Result<String> {
 		));
 	}
 
-	for channel in &channels {
-		let state = channel.channel_shutdown_state.and_then(ChannelShutdownState::from_i32);
-		let closing = matches!(
-			state,
-			Some(ChannelShutdownState::ShutdownInitiated)
-				| Some(ChannelShutdownState::ResolvingHtlcs)
-				| Some(ChannelShutdownState::NegotiatingClosingFee)
-				| Some(ChannelShutdownState::ShutdownComplete)
-		);
-		if closing {
-			lines.push(format!(
-				"🥀 Closing with {}: {}",
-				node.label(&channel.counterparty_node_id).await,
-				sats(channel.channel_value_sats)
-			));
-		}
+	for channel in channels.iter().filter(|c| is_closing(c)) {
+		lines.push(format!(
+			"🥀 Closing with {}: {}",
+			node.label(&channel.counterparty_node_id).await,
+			sats(channel.channel_value_sats)
+		));
 	}
 
 	let (mut htlcs_out, mut htlcs_in) = (0, 0);
@@ -612,6 +735,24 @@ async fn find_peers(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn draws_balance_bars() {
+		assert_eq!(balance_bar(0, 0), "▱▱▱▱▱▱▱▱▱▱");
+		assert_eq!(balance_bar(0, 1_000), "▱▱▱▱▱▱▱▱▱▱");
+		assert_eq!(balance_bar(1_000, 0), "▰▰▰▰▰▰▰▰▰▰");
+		assert_eq!(balance_bar(1_000, 3_000), "▰▰▰▱▱▱▱▱▱▱");
+		assert_eq!(balance_bar(u64::MAX, u64::MAX), "▰▰▰▰▰▱▱▱▱▱");
+	}
+
+	#[test]
+	fn ages_channels_by_funding_height() {
+		// Block 800,000, transaction 1,234, output 1.
+		let scid = (800_000 << 40) | (1_234 << 16) | 1;
+		assert_eq!(channel_age(scid, 800_000), 0);
+		assert_eq!(channel_age(scid, 800_144), DAY_SECS);
+		assert_eq!(channel_age(scid, 799_000), 0);
+	}
 
 	#[test]
 	fn only_warns_about_stale_syncs() {
