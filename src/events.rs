@@ -176,9 +176,21 @@ async fn handle_event(
 async fn channel_message(node: &Node, event: ChannelStateChanged) -> Option<String> {
 	let state = ChannelState::from_i32(event.state)?;
 
+	if event.funding_txo.is_some() {
+		node.mark_funded(&event.channel_id);
+	}
+
 	// Closed channels are no longer listed, so rely on what was cached while they were open.
 	let info = match state {
-		ChannelState::Closed => node.cached_channel(&event.channel_id),
+		ChannelState::Closed => {
+			// LDK reports closes for channels that were never funded, such as an inbound open
+			// that failed during negotiation. Skip those.
+			if !node.is_funded(&event.channel_id) && node.channels_loaded() {
+				tracing::debug!("skipping close of unfunded channel {}", event.channel_id);
+				return None;
+			}
+			node.cached_channel(&event.channel_id)
+		},
 		_ => {
 			if let Err(e) = node.list_channels().await {
 				tracing::warn!("failed to list channels: {e}");

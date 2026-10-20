@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -46,6 +47,11 @@ pub struct Node {
 	pub client: LdkServerClient,
 	aliases: Mutex<HashMap<String, (Option<String>, Instant)>>,
 	channels: Mutex<HashMap<String, ChannelInfo>>,
+	/// IDs of channels known to have been funded, from channel lists and open events.
+	funded: Mutex<HashSet<String>>,
+	/// Whether channels have been listed at least once, so `funded` covers channels that were
+	/// opened before the bot started.
+	channels_loaded: AtomicBool,
 }
 
 /// Fetches every page of a paginated list RPC.
@@ -70,7 +76,13 @@ impl Node {
 		let client =
 			LdkServerClient::new(connection.address, connection.macaroon, &connection.cert_pem)
 				.map_err(anyhow::Error::msg)?;
-		Ok(Self { client, aliases: Mutex::default(), channels: Mutex::default() })
+		Ok(Self {
+			client,
+			aliases: Mutex::default(),
+			channels: Mutex::default(),
+			funded: Mutex::default(),
+			channels_loaded: AtomicBool::new(false),
+		})
 	}
 
 	/// Looks up a node's alias in the network graph, caching the result.
@@ -117,6 +129,10 @@ impl Node {
 	pub async fn list_channels(&self) -> Result<Vec<Channel>> {
 		let channels =
 			rpc(RPC_TIMEOUT, self.client.list_channels(ListChannelsRequest {})).await?.channels;
+		let mut funded = self.funded.lock().unwrap();
+		funded.extend(
+			channels.iter().filter(|c| c.funding_txo.is_some()).map(|c| c.channel_id.clone()),
+		);
 		let mut cache = self.channels.lock().unwrap();
 		for channel in &channels {
 			cache.insert(
@@ -128,7 +144,21 @@ impl Node {
 				},
 			);
 		}
+		self.channels_loaded.store(true, Ordering::Relaxed);
 		Ok(channels)
+	}
+
+	/// Whether channels have been listed at least once since the bot started.
+	pub fn channels_loaded(&self) -> bool {
+		self.channels_loaded.load(Ordering::Relaxed)
+	}
+
+	pub fn mark_funded(&self, channel_id: &str) {
+		self.funded.lock().unwrap().insert(channel_id.to_string());
+	}
+
+	pub fn is_funded(&self, channel_id: &str) -> bool {
+		self.funded.lock().unwrap().contains(channel_id)
 	}
 
 	pub fn cached_channel(&self, channel_id: &str) -> Option<ChannelInfo> {
