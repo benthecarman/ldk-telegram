@@ -17,7 +17,7 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "ldk-server-client-0.1.0" = "sha256-viNu5WVdZIj7cPJucFBLv9C9jGTZUo/OVY0e6OHI7Mo=";
+              "ldk-server-client-0.1.0" = "sha256-OzmKTOX3wROk1DXxwsj/RmFiohLYHA0nFv6bKtYCx8g=";
             };
           };
           meta = {
